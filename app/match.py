@@ -57,15 +57,34 @@ def load_qdrant_vectordb() -> QdrantVectorStore:
 
 
 
-def retrieve_candidates(job_offer: str, k: int = 5):
+def retrieve_candidates(job_offer: str, k: int = 3):
     """
-    Récupère les k chunks les plus proches de l'offre.
-    (Plusieurs chunks peuvent appartenir au même candidat_index.)
+    Récupère des chunks depuis Qdrant et les regroupe par candidat.
+    Retourne k candidats uniques avec leurs chunks concaténés.
     """
     vectordb = load_qdrant_vectordb()
-    docs = vectordb.similarity_search(job_offer, k=k)
-    print(f"{len(docs)} chunks/candidats récupérés depuis Qdrant.")
-    return docs
+
+    # On récupère large
+    raw_docs = vectordb.similarity_search(job_offer, k=50)
+
+    candidates = {}
+    for doc in raw_docs:
+        cid = doc.metadata.get("candidate_index")
+
+        if cid not in candidates:
+            candidates[cid] = {
+                "metadata": doc.metadata,
+                "texts": []
+            }
+
+        candidates[cid]["texts"].append(doc.page_content)
+
+        if len(candidates) >= k:
+            break
+
+    print(f"{len(candidates)} candidats uniques sélectionnés.")
+    return candidates
+
 
 
 def get_openrouter_client() -> OpenAI:
@@ -81,34 +100,32 @@ def get_openrouter_client() -> OpenAI:
     return client
 
 
-def analyze_with_llm(job_offer: str, docs) -> List[Dict]:
+def analyze_with_llm(job_offer: str, candidates_dict) -> list:
     client = get_openrouter_client()
-
     results = []
-    for doc in docs:
-        prompt = f"""
-Tu es un assistant RH pour l'alternance.
 
-Voici l'offre d'alternance :
+    for cid, data in candidates_dict.items():
+        full_text = "\n".join(data["texts"])[:4000]  # limite tokens
+        meta = data["metadata"]
+
+        prompt = f"""
+Tu es un assistant RH.
+
+Voici l'offre :
 
 \"\"\"{job_offer}\"\"\"
 
-Voici un extrait de CV (chunk) pour un candidat :
+Voici le CV complet du candidat (plusieurs extraits regroupés) :
 
-\"\"\"{doc.page_content[:2000]}\"\"\"
+\"\"\"{full_text}\"\"\"
 
-Analyse ce candidat par rapport à l'offre et réponds en FRANÇAIS
-avec le format SUIVANT (texte simple, pas de JSON) :
+Analyse ce candidat et réponds STRICTEMENT avec :
 
-Score (0-100) : <un nombre>
+Score (0-100) : <nombre>
 Points forts :
-- ...
 - ...
 Points faibles :
 - ...
-- ...
-
-Ne rajoute rien d'autre autour, seulement ce format.
 """
 
         response = client.chat.completions.create(
@@ -119,14 +136,13 @@ Ne rajoute rien d'autre autour, seulement ce format.
             ],
         )
 
-        content = response.choices[0].message.content
-
         results.append({
-            "metadata": doc.metadata,
-            "analysis": content,
+            "metadata": meta,
+            "analysis": response.choices[0].message.content
         })
 
     return results
+
 
 
 def match(job_offer: str, k: int = 3) -> List[Dict]:
@@ -135,9 +151,8 @@ def match(job_offer: str, k: int = 3) -> List[Dict]:
     1) retrieval des chunks/candidats les plus proches dans Qdrant
     2) analyse RH par le LLM (OpenRouter)
     """
-    docs = retrieve_candidates(job_offer, k=k)
-    analyses = analyze_with_llm(job_offer, docs)
-    return analyses
+    candidates = retrieve_candidates(job_offer, k)
+    return analyze_with_llm(job_offer, candidates)
 
 
 if __name__ == "__main__":

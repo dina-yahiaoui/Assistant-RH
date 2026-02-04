@@ -73,9 +73,10 @@ if st.button("🔍 Lancer le matching"):
 
                 st.markdown(
                     f"#### 🧑‍🎓 Candidat #{i} — "
-                    f"index: `{meta.get('row_index')}` | "
+                    f"index: `{meta.get('candidate_index')}` | "
                     f"catégorie: `{meta.get('category', 'N/A')}`"
                 )
+
                 st.markdown("**Analyse générée par le LLM :**")
                 st.code(analysis)
                 st.markdown("---")

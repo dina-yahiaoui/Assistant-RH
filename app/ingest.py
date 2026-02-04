@@ -46,7 +46,8 @@ def detect_text_column(df: pd.DataFrame) -> str:
 
 def load_cv_documents(limit: int = 10):
     """
-    Charge 10 profils Kaggle (CSV) et les transforme en Documents.
+    Charge jusqu'à 10 profils Kaggle (CSV) et les transforme en Documents.
+    On essaie de mélanger les catégories si possible.
     """
     print(f"Lecture du CSV Kaggle : {CV_CSV_PATH}")
     df = pd.read_csv(CV_CSV_PATH)
@@ -55,26 +56,34 @@ def load_cv_documents(limit: int = 10):
     text_col = detect_text_column(df)
     print("Colonne utilisée pour le texte du CV :", text_col)
 
-    # ➜ ici on prend les 10 premiers profils (tu peux faire df.sample(10) si tu veux aléatoire)
-    df = df.head(limit)
+    # Si la colonne Category existe, on essaie de prendre 1 CV par catégorie
+    if "Category" in df.columns:
+        grouped = (
+            df.groupby("Category", group_keys=False)
+              .apply(lambda x: x.sample(1, random_state=42))
+        )
+        df_sample = grouped.head(limit)
+    else:
+        # Sinon, on prend juste 10 CV au hasard
+        df_sample = df.sample(limit, random_state=42)
+
+    print("Catégories retenues :", df_sample.get("Category", "N/A").tolist())
 
     docs = []
-    for idx, row in df.iterrows():
+    for idx, row in df_sample.iterrows():
         text = str(row[text_col])
         metadata = {
             "candidate_index": int(idx),
         }
 
-        # Si tu as une colonne 'Category' on la garde
-        for cat_col in ["Category", "category", "Job Title", "CategoryName"]:
-            if cat_col in df.columns:
-                metadata["category"] = str(row[cat_col])
-                break
+        if "Category" in df.columns:
+            metadata["category"] = str(row["Category"])
 
         docs.append(Document(page_content=text, metadata=metadata))
 
     print(f"{len(docs)} CV chargés (avant découpage).")
     return docs
+
 
 
 def build_qdrant_vector_store():
