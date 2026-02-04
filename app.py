@@ -1,8 +1,10 @@
 # app.py
 import streamlit as st
 
-from app.ingest import build_vector_store
+from app.ingest import build_qdrant_vector_store
 from app.match import match
+
+
 
 st.set_page_config(page_title="Assistant RH Alternance", layout="wide")
 
@@ -12,7 +14,7 @@ st.markdown(
     """
 Cet assistant permet à un service RH de :
 
-1. **Indexer** une base de CV candidats (dataset Kaggle) dans une base vectorielle **Chroma**  
+1. **Indexer** une base de CV candidats (dataset Kaggle) dans une base vectorielle Qdrant
 2. **Analyser** une offre d'alternance  
 3. **Retrouver** les profils les plus pertinents  
 4. **Générer** pour chaque candidat une analyse via un **LLM (OpenRouter, gpt-4o-mini)** :
@@ -24,10 +26,11 @@ Cet assistant permet à un service RH de :
 
 st.sidebar.header("Actions")
 
-if st.sidebar.button("📥 (Ré)indexer les CV"):
+if st.sidebar.button("📥 (Ré)indexer les CV dans Qdrant"):
     with st.spinner("Indexation des CV en cours..."):
-        build_vector_store()
+        build_qdrant_vector_store()
     st.sidebar.success("Indexation terminée ✅")
+
 
 st.markdown("### 1. Coller une offre d'alternance")
 

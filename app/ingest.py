@@ -1,31 +1,34 @@
 # app/ingest.py
+import os
 from pathlib import Path
 import pandas as pd
 
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_qdrant import QdrantVectorStore
+from langchain_openai import OpenAIEmbeddings
 
-# Racine du projet
+# --- Chemins ---
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 CV_CSV_PATH = BASE_DIR / "data" / "cv" / "resumes.csv"
-PERSIST_DIR = BASE_DIR / "data" / "chroma_cv"
+
+# --- Config Qdrant & OpenRouter ---
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "assistant_rh_cvs")
+
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_EMBEDDINGS_MODEL = os.getenv(
+    "OPENROUTER_EMBEDDINGS_MODEL",
+    "openai/text-embedding-3-small",
+)
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
-def load_cv_documents(limit: int = 50):
+def detect_text_column(df: pd.DataFrame) -> str:
     """
-    Charge les CV depuis le CSV Kaggle et les transforme
-    en objets Document pour LangChain.
-    Le code essaie de deviner automatiquement la bonne colonne texte.
+    Essaie de deviner la colonne qui contient le texte du CV.
     """
-    print(f"Lecture du fichier CSV : {CV_CSV_PATH}")
-    df = pd.read_csv(CV_CSV_PATH)
-    df = df.head(limit)
-
-    print("Colonnes trouvées dans le CSV :", list(df.columns))
-
-    # 👉 On essaie de deviner la bonne colonne texte
     candidate_text_cols = [
         "Resume", "resume", "RESUME",
         "Resume_str", "ResumeText", "Resume_text",
@@ -34,28 +37,35 @@ def load_cv_documents(limit: int = 50):
         "Summary", "summary",
         "Professional Summary",
     ]
-
-    text_col = None
     for col in candidate_text_cols:
         if col in df.columns:
-            text_col = col
-            break
+            return col
+    # fallback : dernière colonne
+    return df.columns[-1]
 
-    # Si aucune colonne connue trouvée, on prend la dernière
-    if text_col is None:
-        text_col = df.columns[-1]
 
+def load_cv_documents(limit: int = 10):
+    """
+    Charge 10 profils Kaggle (CSV) et les transforme en Documents.
+    """
+    print(f"Lecture du CSV Kaggle : {CV_CSV_PATH}")
+    df = pd.read_csv(CV_CSV_PATH)
+    print("Colonnes CSV :", list(df.columns))
+
+    text_col = detect_text_column(df)
     print("Colonne utilisée pour le texte du CV :", text_col)
+
+    # ➜ ici on prend les 10 premiers profils (tu peux faire df.sample(10) si tu veux aléatoire)
+    df = df.head(limit)
 
     docs = []
     for idx, row in df.iterrows():
         text = str(row[text_col])
-
         metadata = {
-            "row_index": int(idx),
+            "candidate_index": int(idx),
         }
 
-        # On essaie aussi de récupérer une catégorie si elle existe
+        # Si tu as une colonne 'Category' on la garde
         for cat_col in ["Category", "category", "Job Title", "CategoryName"]:
             if cat_col in df.columns:
                 metadata["category"] = str(row[cat_col])
@@ -63,34 +73,59 @@ def load_cv_documents(limit: int = 50):
 
         docs.append(Document(page_content=text, metadata=metadata))
 
-    print(f"{len(docs)} documents créés.")
+    print(f"{len(docs)} CV chargés (avant découpage).")
     return docs
 
 
-def build_vector_store():
+def build_qdrant_vector_store():
     """
-    Construit et persiste le vector store Chroma
-    à partir des CV chargés.
+    Construit / recrée la collection Qdrant à partir de 10 profils Kaggle.
+    Avec découpage en chunks (RAG-style).
     """
-    docs = load_cv_documents()
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "OPENAI_API_KEY n'est pas défini. "
+            "Mets ta clé OpenRouter dans OPENAI_API_KEY (sk-or-v1-...)."
+        )
 
-    print("Création des embeddings (modèle local) et du vector store Chroma...")
+    base_docs = load_cv_documents(limit=10)
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    # --- Découpage en chunks ---
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        add_start_index=True,
+    )
+    chunks = splitter.split_documents(base_docs)
+    print(f"{len(chunks)} chunks générés à partir des 10 CV.")
+
+    # Optionnel : afficher un exemple
+    example = chunks[0]
+    print("Exemple de chunk :")
+    print("Metadata :", example.metadata)
+    print("Texte (début) :", example.page_content[:200], "...\n")
+
+    print("Initialisation des embeddings OpenRouter pour Qdrant...")
+    embeddings = OpenAIEmbeddings(
+        model=OPENROUTER_EMBEDDINGS_MODEL,
+        api_key=OPENAI_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
     )
 
-    vectordb = Chroma.from_documents(
-        documents=docs,
+    print(f"Indexation de {len(chunks)} chunks dans Qdrant ({QDRANT_URL}, collection '{QDRANT_COLLECTION}')...")
+
+    vector_store = QdrantVectorStore.from_documents(
+        documents=chunks,
         embedding=embeddings,
-        persist_directory=str(PERSIST_DIR),
+        url=QDRANT_URL,
+        prefer_grpc=False,  # HTTP suffit
+        collection_name=QDRANT_COLLECTION,
+        force_recreate=True,  # recrée la collection à chaque run
     )
 
-    vectordb.persist()
-    print(f"Vector store créé et sauvegardé dans : {PERSIST_DIR}")
-    return vectordb
+    print("✅ Indexation terminée dans Qdrant.")
+    return vector_store
 
 
 if __name__ == "__main__":
-    build_vector_store()
-    print("✅ Indexation des CV terminée.")
+    build_qdrant_vector_store()
